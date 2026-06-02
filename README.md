@@ -47,7 +47,7 @@ and the driver:
 ```nix
 # flake.nix
 {
-  inputs.idcool-display.url = "github:<you>/idcooling-temp-display-linux";
+  inputs.idcool-display.url = "github:relf108/idcooling-temp-display-linux";
   # pass inputs through to your nixosSystem (specialArgs / module args), then
   # in a module:  imports = [ inputs.idcool-display.nixosModules.default ];
 }
@@ -67,7 +67,7 @@ services.idcool-display.metric = "temp";   # or "usage" / "freq"
 { ... }:
 let
   idcool = builtins.fetchTarball
-    "https://github.com/<you>/idcooling-temp-display-linux/archive/main.tar.gz";
+    "https://github.com/relf108/idcooling-temp-display-linux/archive/main.tar.gz";
 in
 {
   imports = [ "${idcool}/nix/idcool-display.nix" ];

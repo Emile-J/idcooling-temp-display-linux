@@ -17,7 +17,7 @@
       nixosModules.default = ./nix/idcool-display.nix;
       nixosModules.idcool-display = ./nix/idcool-display.nix;
 
-      # `nix run github:<you>/idcooling-temp-display-linux -- --once`
+      # `nix run github:relf108/idcooling-temp-display-linux -- --once`
       packages = forAllSystems (pkgs: {
         default = pkgs.writeShellScriptBin "idcool-display" ''
           exec ${pkgs.python3}/bin/python3 ${./idcool_display.py} "$@"
