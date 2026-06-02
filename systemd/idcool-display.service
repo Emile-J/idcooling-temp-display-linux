@@ -1,0 +1,20 @@
+[Unit]
+Description=ID-COOLING Temp Display temperature feed
+# No device-ordering dependency: the daemon waits for the hidraw node to appear
+# (resolved by USB VID:PID), so start order vs udev does not matter.
+
+[Service]
+ExecStart=/usr/local/bin/idcool-display --metric temp --interval 1
+Restart=on-failure
+RestartSec=5
+# Runs as root to open the hidraw node directly. If you prefer non-root, drop
+# this, install the udev rule, and ensure the service user is in the rule's
+# GROUP (e.g. DynamicUser=yes + SupplementaryGroups=plugdev).
+User=root
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

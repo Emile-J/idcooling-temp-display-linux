@@ -1,0 +1,6 @@
+# ID-COOLING Temp Display (USB 1a86:e317)
+# Stable /dev/idcool symlink + group access so the device can be used without
+# root. Adjust GROUP to one your user is in (plugdev is common; this repo's
+# author uses i2c). Reload with:
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=hidraw
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="e317", MODE="0660", GROUP="plugdev", SYMLINK+="idcool"

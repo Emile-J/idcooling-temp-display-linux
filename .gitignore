@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Reverse-engineering scratch (installers, extracted app, captures)
+*.exe
+*.msi
+*.7z
+*.asar
+*.pcap
+/installer/
+/app/
+/src/
+
+# Editor/agent local state
+.claude/
