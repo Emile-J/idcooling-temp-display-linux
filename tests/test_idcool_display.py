@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 import stat
 import struct
@@ -53,6 +54,35 @@ class WriteTests(unittest.TestCase):
     def test_rejects_wrong_report_length(self) -> None:
         with self.assertRaises(ValueError):
             driver.write_report(7, bytes(63))
+
+
+class HidIdTests(unittest.TestCase):
+    def test_parses_identity_among_other_uevent_fields(self) -> None:
+        for identity in ("0003:00001A86:0000E317", "0003:00001a86:0000e317"):
+            with self.subTest(identity=identity):
+                self.assertEqual(
+                    driver._parse_hid_id(
+                        f"DRIVER=hid-generic\nHID_ID={identity}\nHID_NAME=IDCOOL-C\n"
+                    ),
+                    (0x03, 0x1A86, 0xE317),
+                )
+
+    def test_missing_hid_id(self) -> None:
+        for text in (
+            "", "HID_NAME=IDCOOL-C\n", "OTHER_HID_ID=0003:00001A86:0000E317"
+        ):
+            with self.subTest(text=text):
+                self.assertIsNone(driver._parse_hid_id(text))
+
+    def test_wrong_field_count(self) -> None:
+        for identity in ("", "0003:00001A86", "0003:00001A86:0000E317:0000"):
+            with self.subTest(identity=identity):
+                self.assertIsNone(driver._parse_hid_id(f"HID_ID={identity}\n"))
+
+    def test_non_hex_field(self) -> None:
+        for identity in ("oops:1A86:E317", "0003:oops:E317", "0003:1A86:oops"):
+            with self.subTest(identity=identity):
+                self.assertIsNone(driver._parse_hid_id(f"HID_ID={identity}\n"))
 
 
 class DeviceTests(unittest.TestCase):
@@ -119,6 +149,36 @@ class SensorTests(unittest.TestCase):
             )
             self.assertEqual(driver.find_temp_path(root), hwmon / "temp2_input")
 
+    def test_selects_zenpower_tctl(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            hwmon = self._make_hwmon(
+                root,
+                "zenpower",
+                {
+                    "temp1_label": "Tdie\n",
+                    "temp1_input": "60000\n",
+                    "temp2_label": "Tctl\n",
+                    "temp2_input": "65000\n",
+                },
+            )
+            self.assertEqual(driver.find_temp_path(root), hwmon / "temp2_input")
+
+    def test_skips_matching_label_with_missing_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            hwmon = self._make_hwmon(
+                root,
+                "k10temp",
+                {
+                    "temp1_input": "60000\n",
+                    "temp2_label": "Tctl\n",
+                    "temp3_label": "Tctl\n",
+                    "temp3_input": "65000\n",
+                },
+            )
+            self.assertEqual(driver.find_temp_path(root), hwmon / "temp3_input")
+
     def test_selects_intel_package(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -168,6 +228,101 @@ class SensorTests(unittest.TestCase):
             mock.patch.object(driver.time, "sleep"),
         ):
             self.assertEqual(driver.read_cpu_usage(), 50.0)
+
+
+class SampleTests(unittest.TestCase):
+    def test_rejects_unknown_metric_without_reading_frequency(self) -> None:
+        with mock.patch.object(
+            driver, "read_cpu_freq_mhz", return_value=3000
+        ) as read:
+            with self.assertRaisesRegex(ValueError, "unknown"):
+                driver.make_sample("unknown", None)  # type: ignore[arg-type]
+        read.assert_not_called()
+
+    def test_frequency_metric(self) -> None:
+        with mock.patch.object(driver, "read_cpu_freq_mhz", return_value=3000.4):
+            self.assertEqual(
+                driver.make_sample("freq", None), (driver.CMD_CPU_FREQUENCY, 3000)
+            )
+
+
+class MainTests(unittest.TestCase):
+    def setUp(self) -> None:
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        self.open_device = stack.enter_context(
+            mock.patch.object(driver, "open_device", return_value=7)
+        )
+        self.close = stack.enter_context(mock.patch.object(driver.os, "close"))
+        self.write = stack.enter_context(mock.patch.object(driver, "write_report"))
+        self.sample = stack.enter_context(mock.patch.object(driver, "make_sample"))
+        self.sleep = stack.enter_context(mock.patch.object(driver.time, "sleep"))
+        self.warning = stack.enter_context(mock.patch.object(driver.LOGGER, "warning"))
+        self.argv = ["--device", "/dev/hidraw7", "--temp-path", "/missing/temp_input"]
+
+    def test_persistent_failure_stops_after_ten_samples(self) -> None:
+        error = ValueError("sensor unavailable")
+        # A finite sequence makes a missing cap fail rather than hang the suite.
+        self.sample.side_effect = [error] * 10 + [AssertionError("retry cap exceeded")]
+        with self.assertRaisesRegex(
+            driver.DriverError, "failed 10 times in a row"
+        ) as raised:
+            driver.main(self.argv)
+        self.assertIs(raised.exception.__cause__, error)
+        self.assertEqual(self.sample.call_count, 10)
+        self.assertEqual(self.warning.call_count, 10)
+        self.warning.assert_called_with(
+            "skipping invalid sensor sample (%d/%d): %s", 10, 10, error
+        )
+        self.assertEqual(self.sleep.call_count, 9)
+        self.write.assert_called_once_with(7, driver.frame(driver.CMD_SHOW, 1))
+        self.close.assert_called_once_with(7)
+
+    def test_success_resets_consecutive_failure_count(self) -> None:
+        error = ValueError("sensor unavailable")
+        self.sample.side_effect = (
+            [error] * 9
+            + [(driver.CMD_CPU_TEMPERATURE, 77)]
+            + [error] * 10
+            + [AssertionError("retry cap exceeded")]
+        )
+        with self.assertRaisesRegex(driver.DriverError, "failed 10 times in a row"):
+            driver.main(self.argv)
+        self.assertEqual(self.sample.call_count, 20)
+        self.assertEqual(self.sleep.call_count, 19)
+        self.assertEqual(self.warning.call_count, 19)
+        self.assertEqual(self.warning.call_args_list[9].args[1:3], (1, 10))
+        self.assertEqual(self.write.call_args_list, [
+            mock.call(7, driver.frame(driver.CMD_SHOW, 1)),
+            mock.call(7, driver.frame(driver.CMD_CPU_TEMPERATURE, 77)),
+        ])
+        self.close.assert_called_once_with(7)
+
+    def test_once_fails_immediately_and_closes_device(self) -> None:
+        error = ValueError("sensor unavailable")
+        self.sample.side_effect = error
+        with self.assertRaisesRegex(
+            driver.DriverError, "sensor unavailable"
+        ) as raised:
+            driver.main(self.argv + ["--once"])
+        self.assertIs(raised.exception.__cause__, error)
+        self.sample.assert_called_once()
+        self.sleep.assert_not_called()
+        self.warning.assert_not_called()
+        self.write.assert_called_once_with(7, driver.frame(driver.CMD_SHOW, 1))
+        self.close.assert_called_once_with(7)
+
+    def test_once_writes_one_sample_and_closes_device(self) -> None:
+        self.sample.return_value = (driver.CMD_CPU_TEMPERATURE, 77)
+        driver.main(self.argv + ["--once"])
+        self.sample.assert_called_once()
+        self.assertEqual(self.write.call_args_list, [
+            mock.call(7, driver.frame(driver.CMD_SHOW, 1)),
+            mock.call(7, driver.frame(driver.CMD_CPU_TEMPERATURE, 77)),
+        ])
+        self.sleep.assert_not_called()
+        self.warning.assert_not_called()
+        self.close.assert_called_once_with(7)
 
 
 class ArgumentTests(unittest.TestCase):

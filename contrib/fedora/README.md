@@ -5,6 +5,14 @@ repository's default systemd setup. It runs the driver as a dedicated
 `idcool-display` system user rather than as root. Nothing here is required by
 the Python driver or the NixOS module.
 
+This setup and the default systemd/udev setup are mutually exclusive. Both
+install a rule named `/etc/udev/rules.d/99-idcooling-temp-display.rules` and a
+service named `/etc/systemd/system/idcool-display.service`. The default rule
+grants access to `plugdev`; this rule grants access to `idcool-display`. When
+switching setups, stop the service first, then replace both the rule and the
+service with the matching pair. Restart the service after applying the new
+configuration (`sudo systemctl restart idcool-display.service`).
+
 Review the files, then install them with:
 
 ```bash
@@ -28,13 +36,6 @@ sudo udevadm trigger --subsystem-match=hidraw
 sudo systemctl daemon-reload
 sudo systemctl enable --now idcool-display.service
 ```
-
-`install` is the standard GNU Coreutils file-copying command; it does not
-download or install a package. Its relevant options are:
-
-- `-D`: create a missing destination directory before copying.
-- `-m0755`: install the Python driver as executable and root-writable.
-- `-m0644`: install configuration as non-executable and root-writable.
 
 `systemd-sysusers` creates the unprivileged `idcool-display` user and matching
 group. It is safe to run again because it leaves an existing account in place.

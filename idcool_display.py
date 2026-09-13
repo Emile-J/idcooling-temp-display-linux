@@ -4,21 +4,27 @@
 Supports the fixed-function USB HID display at 1a86:e317. The driver reads a
 CPU metric from procfs/sysfs and sends the vendor reports documented in
 PROTOCOL.md. It does not control the cooler's fan or pump.
+
+Usage:
+    sudo ./idcool_display.py                  # show CPU temp, updated every 1s
+    sudo ./idcool_display.py --metric usage   # show CPU usage % instead
+    sudo ./idcool_display.py --metric freq    # show CPU frequency in MHz
+    sudo ./idcool_display.py --once           # one update and exit (for testing)
 """
 
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
-from dataclasses import dataclass
 import fcntl
 import logging
 import math
 import os
-from pathlib import Path
 import stat
 import struct
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 USB_VENDOR_ID = 0x1A86
@@ -26,6 +32,7 @@ USB_PRODUCT_ID = 0xE317
 USB_BUS_TYPE = 0x03
 REPORT_LEN = 64
 MIN_INTERVAL = 0.2  # Avoid accidentally flooding the USB device with reports.
+MAX_CONSECUTIVE_FAILURES = 10
 LOGGER = logging.getLogger(__name__)
 Metric = Literal["temp", "usage", "freq"]
 
@@ -121,7 +128,12 @@ def _parse_hid_id(uevent: str) -> tuple[int, int, int] | None:
 
 
 def find_device() -> Path | None:
-    """Resolve the hidraw node by exact USB bus type and VID:PID."""
+    """Resolve the hidraw node by exact USB bus type and VID:PID from sysfs.
+
+    Independent of any /dev symlink or udev/service ordering: the hidraw node
+    exists as soon as the kernel enumerates the device. HID_ID looks like
+    "0003:00001A86:0000E317".
+    """
     for hidraw_path in sorted(Path("/sys/class/hidraw").glob("hidraw*")):
         try:
             identity = _parse_hid_id(_read_text(hidraw_path / "device/uevent"))
@@ -256,12 +268,18 @@ def find_temp_path(hwmon_root: Path | None = None) -> Path:
             try:
                 if _read_text(label) == wanted:
                     path = label.with_name(label.stem[: -len("_label")] + "_input")
-                    return path if path.is_file() else None
+                    if not path.is_file():
+                        continue
+                    return path
             except OSError:
                 continue
         return None
 
-    for driver_name, label in (("k10temp", "Tctl"), ("coretemp", "Package id 0")):
+    for driver_name, label in (
+        ("k10temp", "Tctl"),
+        ("zenpower", "Tctl"),
+        ("coretemp", "Package id 0"),
+    ):
         for hwmon_path, name in hwmons.items():
             if name != driver_name:
                 continue
@@ -322,9 +340,7 @@ def read_cpu_usage() -> float:
 def read_cpu_freq_mhz() -> float:
     """Return average current CPU frequency, failing rather than displaying 0."""
     frequencies: list[float] = []
-    for path in Path("/sys/devices/system/cpu").glob(
-        "cpu*/cpufreq/scaling_cur_freq"
-    ):
+    for path in Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_cur_freq"):
         try:
             frequency = int(_read_text(path)) / 1000.0  # kHz -> MHz
             if 0 < frequency <= COMMAND_RANGES[CMD_CPU_FREQUENCY][1]:
@@ -345,7 +361,9 @@ def make_sample(metric: Metric, temp_path: Path | None) -> tuple[int, int]:
         return CMD_CPU_TEMPERATURE, round(read_temp_c(temp_path))
     if metric == "usage":
         return CMD_CPU_USAGE, round(read_cpu_usage())
-    return CMD_CPU_FREQUENCY, round(read_cpu_freq_mhz())
+    if metric == "freq":
+        return CMD_CPU_FREQUENCY, round(read_cpu_freq_mhz())
+    raise ValueError(metric)
 
 
 def build_argument_parser() -> argparse.ArgumentParser:
@@ -390,16 +408,26 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     try:
         write_report(fd, frame(CMD_SHOW, 1))
+        failures = 0
         while True:
             try:
                 cmd, value = make_sample(args.metric, temp_path)
                 write_report(fd, frame(cmd, value))
+                failures = 0
             except ValueError as exc:
-                # Skip transient read or validation failures instead of sending
-                # invalid data. One-shot mode reports the error immediately.
+                # Skip transient failures, but let the service manager restart
+                # after persistent failures. One-shot mode fails immediately.
                 if args.once:
                     raise DriverError(str(exc)) from exc
-                LOGGER.warning("skipping invalid sensor sample: %s", exc)
+                failures += 1
+                LOGGER.warning(
+                    "skipping invalid sensor sample (%d/%d): %s",
+                    failures, MAX_CONSECUTIVE_FAILURES, exc,
+                )
+                if failures >= MAX_CONSECUTIVE_FAILURES:
+                    raise DriverError(
+                        f"sensor sampling failed {failures} times in a row: {exc}"
+                    ) from exc
 
             if args.once:
                 break

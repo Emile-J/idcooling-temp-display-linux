@@ -24,20 +24,14 @@ First confirm you actually have this device:
 lsusb | grep -i 1a86:e317
 ```
 
-This should return something along the lines of:
-
-```bash
-# ...QinHeng Electronics IDCOOL-C
-```
-
 ### Requirements
 
 - Python 3 (standard library only)
 - Linux `hidraw` device
 
-CPU temperature is read from `/sys/class/hwmon` (AMD `k10temp` / Intel
-`coretemp` auto-detected). On systems with an unrecognized sensor, select it
-explicitly with `--temp-path`.
+CPU temperature is read from `/sys/class/hwmon` (AMD `k10temp` / `zenpower`
+and Intel `coretemp` auto-detected). On systems with an unrecognized sensor,
+select it explicitly with `--temp-path`.
 
 ### Try it first (no install)
 
@@ -104,11 +98,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now idcool-display.service
 ```
 
-Here, `install` is the standard GNU Coreutils file-copying command; it does not
-download a package. `-m0755` installs the driver as executable, while `-m0644`
-installs non-executable configuration files. The destination directories are
-administrator-owned, which is why these copies use `sudo`.
-
 To show a different metric, change `--metric` in the service file, then run
 `sudo systemctl daemon-reload && sudo systemctl restart idcool-display`.
 
@@ -120,7 +109,11 @@ verifies the opened device, so it does not rely on that symlink.
 
 An optional least-privilege setup using a dedicated service account is available
 under [`contrib/fedora/`](contrib/fedora/README.md). It is independent of the
-default systemd files and does not change the NixOS setup.
+default systemd files and does not change the NixOS setup. Use one setup or the
+other, not both: their udev rules share the installed filename
+`99-idcooling-temp-display.rules` but grant access to different groups
+(`plugdev` in the default setup, `idcool-display` in the Fedora setup). Each
+service must be installed with its matching rule.
 
 ## Troubleshooting
 
