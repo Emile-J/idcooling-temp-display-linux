@@ -1,15 +1,40 @@
 #!/usr/bin/env python3
-"""Drive an ID-COOLING temperature display on Linux.
+"""idcool-display - drive an ID-COOLING "Temp Display" cooler on Linux.
 
-Supports the fixed-function USB HID display at 1a86:e317. The driver reads a
-CPU metric from procfs/sysfs and sends the vendor reports documented in
-PROTOCOL.md. It does not control the cooler's fan or pump.
+Shows the CPU temperature on ID-COOLING coolers whose little screen enumerates
+as USB HID 1a86:e317 - e.g. the FX TD / FROZN TD "Temp Display" series, also
+sold rebranded (the USB product string reads "IDCOOL-C", as shipped in some
+Aftershock PCs).
+
+The screen is a write-only USB-HID device: the host pushes a value and the
+device firmware renders the number. There is no official Linux software, so
+this daemon replicates the vendor protocol (decoded from the vendor Electron
+app and verified on real hardware). Pure Python standard library - no deps.
+
+Protocol - every command is a 64-byte HID output report:
+
+    byte 0   : 0x55             header
+    byte 1   : 0xBB             header
+    byte 2   : 0x02             payload length
+    byte 3   : command          1=CPU_TEMP, 2=CPU_FREQ, 3=CPU_USAGE, 4=SHOW
+    byte 4   : value >> 8        16-bit big-endian
+    byte 5   : value & 0xFF
+    byte 6   : checksum = (0x55 + 0xBB + 0x02 + cmd + hi + lo) & 0xFF
+    byte 7-63: 0x00 padding
+
+The report is written to /dev/hidrawN prefixed with a 0x00 report-id byte
+(the device uses unnumbered reports; the kernel strips the leading byte).
+
+NOTE: this hardware can ONLY display the numbers its firmware knows how to
+draw (temp / frequency / usage). It is not a framebuffer - arbitrary images
+are not possible.
 
 Usage:
-    sudo ./idcool_display.py                  # show CPU temp, updated every 1s
-    sudo ./idcool_display.py --metric usage   # show CPU usage % instead
-    sudo ./idcool_display.py --metric freq    # show CPU frequency in MHz
-    sudo ./idcool_display.py --once           # one update and exit (for testing)
+    sudo ./idcool_display.py                 # show CPU temp, updated every 1s
+    sudo ./idcool_display.py --metric usage  # show CPU usage % instead
+    ./idcool_display.py --once --metric temp # one update and exit (for testing)
+
+License: MIT.
 """
 
 from __future__ import annotations
